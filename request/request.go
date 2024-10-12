@@ -4,11 +4,10 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"net/http/cookiejar"
 	"strconv"
 	"strings"
 	"time"
@@ -16,8 +15,9 @@ import (
 	cookiemonster "github.com/MercuryEngineering/CookieMonster"
 	"github.com/fatih/color"
 	"github.com/kr/pretty"
+	"github.com/pkg/errors"
 
-	"github.com/iawia002/annie/config"
+	"github.com/iawia002/lux/config"
 )
 
 var (
@@ -55,14 +55,19 @@ func Request(method, url string, body io.Reader, headers map[string]string) (*ht
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   15 * time.Minute,
+		Jar:       jar,
 	}
 
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	for k, v := range config.FakeHeaders {
 		req.Header.Set(k, v)
@@ -74,16 +79,16 @@ func Request(method, url string, body io.Reader, headers map[string]string) (*ht
 		req.Header.Set("Referer", url)
 	}
 	if rawCookie != "" {
-		var cookie string
-		cookies, err := cookiemonster.ParseString(rawCookie)
-		if err != nil || len(cookies) == 0 {
-			cookie = rawCookie
-		}
-		if cookie != "" {
-			req.Header.Set("Cookie", cookie)
-		}
-		for _, c := range cookies {
-			req.AddCookie(c)
+		// parse cookies in Netscape HTTP cookie format
+		cookies, _ := cookiemonster.ParseString(rawCookie)
+		if len(cookies) > 0 {
+			for _, c := range cookies {
+				req.AddCookie(c)
+			}
+		} else {
+			// cookie is not Netscape HTTP format, set it directly
+			// a=b; c=d
+			req.Header.Set("Cookie", rawCookie)
 		}
 	}
 
@@ -106,11 +111,11 @@ func Request(method, url string, body io.Reader, headers map[string]string) (*ht
 		} else if i+1 >= retryTimes {
 			var err error
 			if requestError != nil {
-				err = fmt.Errorf("request error: %v", requestError)
+				err = errors.Errorf("request error: %v", requestError)
 			} else {
-				err = fmt.Errorf("%s request error: HTTP %d", url, res.StatusCode)
+				err = errors.Errorf("%s request error: HTTP %d", url, res.StatusCode)
 			}
-			return nil, err
+			return nil, errors.WithStack(err)
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -149,7 +154,7 @@ func GetByte(url, refer string, headers map[string]string) ([]byte, error) {
 	}
 	res, err := Request(http.MethodGet, url, nil, headers)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	defer res.Body.Close() // nolint
 
@@ -164,9 +169,9 @@ func GetByte(url, refer string, headers map[string]string) ([]byte, error) {
 	}
 	defer reader.Close() // nolint
 
-	body, err := ioutil.ReadAll(reader)
+	body, err := io.ReadAll(reader)
 	if err != nil && err != io.EOF {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	return body, nil
 }
@@ -178,7 +183,7 @@ func Headers(url, refer string) (http.Header, error) {
 	}
 	res, err := Request(http.MethodGet, url, nil, headers)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	defer res.Body.Close() // nolint
 	return res.Header, nil
